@@ -2,12 +2,9 @@
 Training file for training SkipNets for supervised pre-training stage
 """
 
-from __future__ import print_function
-
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
-from torch.autograd import Variable
 
 import os
 import shutil
@@ -159,24 +156,23 @@ def run_training(args):
         # measuring data loading time
         data_time.update(time.time() - end)
 
-        target = target.cuda(async=False)
-        input_var = Variable(input).cuda()
-        target_var = Variable(target).cuda()
+        target = target.cuda(non_blocking=False)
+        input = input.cuda()
 
         # compute output
-        output, masks, logprobs = model(input_var)
+        output, masks, logprobs = model(input)
 
         # collect skip ratio of each layer
         skips = [mask.data.le(0.5).float().mean() for mask in masks]
         if skip_ratios.len != len(skips):
             skip_ratios.set_len(len(skips))
 
-        loss = criterion(output, target_var)
+        loss = criterion(output, target)
 
         # measure accuracy and record loss
         prec1, = accuracy(output.data, target, topk=(1,))
-        losses.update(loss.data[0], input.size(0))
-        top1.update(prec1[0], input.size(0))
+        losses.update(loss.item(), input.size(0))
+        top1.update(prec1.item(), input.size(0))
         skip_ratios.update(skips, input.size(0))
 
         # compute gradient and do SGD step
@@ -243,27 +239,27 @@ def validate(args, test_loader, model, criterion):
     # switch to evaluation mode
     model.eval()
     end = time.time()
-    for i, (input, target) in enumerate(test_loader):
-        target = target.cuda(async=True)
-        input_var = Variable(input, volatile=True).cuda()
-        target_var = Variable(target, volatile=True).cuda()
-        # compute output
-        output, masks, _ = model(input_var)
-        skips = [mask.data.le(0.5).float().mean() for mask in masks]
-        if skip_ratios.len != len(skips):
-            skip_ratios.set_len(len(skips))
-        loss = criterion(output, target_var)
+    with torch.no_grad():
+        for i, (input, target) in enumerate(test_loader):
+            target = target.cuda(non_blocking=True)
+            input = input.cuda()
+            # compute output
+            output, masks, _ = model(input)
+            skips = [mask.data.le(0.5).float().mean() for mask in masks]
+            if skip_ratios.len != len(skips):
+                skip_ratios.set_len(len(skips))
+            loss = criterion(output, target)
 
-        # measure accuracy and record loss
-        prec1, = accuracy(output.data, target, topk=(1,))
-        top1.update(prec1[0], input.size(0))
-        skip_ratios.update(skips, input.size(0))
-        losses.update(loss.data[0], input.size(0))
-        batch_time.update(time.time() - end)
-        end = time.time()
+            # measure accuracy and record loss
+            prec1, = accuracy(output.data, target, topk=(1,))
+            top1.update(prec1.item(), input.size(0))
+            skip_ratios.update(skips, input.size(0))
+            losses.update(loss.item(), input.size(0))
+            batch_time.update(time.time() - end)
+            end = time.time()
 
-        if i % args.print_freq == 0 or (i == (len(test_loader) - 1)):
-            logging.info(
+            if i % args.print_freq == 0 or (i == (len(test_loader) - 1)):
+                logging.info(
                 'Test: [{}/{}]\t'
                 'Time: {batch_time.val:.4f}({batch_time.avg:.4f})\t'
                 'Loss: {loss.val:.3f}({loss.avg:.3f})\t'

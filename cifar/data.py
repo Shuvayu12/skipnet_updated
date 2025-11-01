@@ -1,8 +1,6 @@
 """prepare CIFAR and SVHN
 """
 
-from __future__ import print_function
-
 import torch
 import torchvision
 import torchvision.transforms as transforms

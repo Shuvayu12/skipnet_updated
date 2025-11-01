@@ -5,8 +5,6 @@ layers) and SkipNets.
 import torch
 import torch.nn as nn
 import math
-from torch.autograd import Variable
-import torch.autograd as autograd
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -192,8 +190,8 @@ class FeedforwardGateI(nn.Module):
         self.avg_layer = nn.AvgPool2d(pool_size)
         self.linear_layer = nn.Conv2d(in_channels=channel, out_channels=2,
                                       kernel_size=1, stride=1)
-        self.prob_layer = nn.Softmax()
-        self.logprob = nn.LogSoftmax()
+        self.prob_layer = nn.Softmax(dim=1)
+        self.logprob = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
         x = self.maxpool(x)
@@ -245,8 +243,8 @@ class SoftGateI(nn.Module):
         self.avg_layer = nn.AvgPool2d(pool_size)
         self.linear_layer = nn.Conv2d(in_channels=channel, out_channels=2,
                                       kernel_size=1, stride=1)
-        self.prob_layer = nn.Softmax()
-        self.logprob = nn.LogSoftmax()
+        self.prob_layer = nn.Softmax(dim=1)
+        self.logprob = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
         x = self.maxpool(x)
@@ -288,8 +286,8 @@ class FeedforwardGateII(nn.Module):
         self.avg_layer = nn.AvgPool2d(pool_size)
         self.linear_layer = nn.Conv2d(in_channels=channel, out_channels=2,
                                       kernel_size=1, stride=1)
-        self.prob_layer = nn.Softmax()
-        self.logprob = nn.LogSoftmax()
+        self.prob_layer = nn.Softmax(dim=1)
+        self.logprob = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -325,8 +323,8 @@ class SoftGateII(nn.Module):
         self.avg_layer = nn.AvgPool2d(pool_size)
         self.linear_layer = nn.Conv2d(in_channels=channel, out_channels=2,
                                       kernel_size=1, stride=1)
-        self.prob_layer = nn.Softmax()
-        self.logprob = nn.LogSoftmax()
+        self.prob_layer = nn.Softmax(dim=1)
+        self.logprob = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -524,8 +522,8 @@ def cifar100_feedforward_110(pretrained=False, **kwargs):
 # For Recurrent Gate
 def repackage_hidden(h):
     """ to reduce memory usage"""
-    if type(h) == Variable:
-        return Variable(h.data)
+    if isinstance(h, torch.Tensor):
+        return h.detach()
     else:
         return tuple(repackage_hidden(v) for v in h)
 
@@ -551,10 +549,8 @@ class RNNGate(nn.Module):
 
     def init_hidden(self, batch_size):
         # The axes semantics are (num_layers, minibatch_size, hidden_dim)
-        return (autograd.Variable(torch.zeros(1, batch_size,
-                                              self.hidden_dim).cuda()),
-                autograd.Variable(torch.zeros(1, batch_size,
-                                              self.hidden_dim).cuda()))
+        return (torch.zeros(1, batch_size, self.hidden_dim).cuda(),
+                torch.zeros(1, batch_size, self.hidden_dim).cuda())
 
     def repackage_hidden(self):
         self.hidden = repackage_hidden(self.hidden)
@@ -593,10 +589,8 @@ class SoftRNNGate(nn.Module):
         self.prob = nn.Sigmoid()
 
     def init_hidden(self, batch_size):
-        return (autograd.Variable(torch.zeros(1, batch_size,
-                                              self.hidden_dim).cuda()),
-                autograd.Variable(torch.zeros(1, batch_size,
-                                              self.hidden_dim).cuda()))
+        return (torch.zeros(1, batch_size, self.hidden_dim).cuda(),
+                torch.zeros(1, batch_size, self.hidden_dim).cuda())
 
     def repackage_hidden(self):
         self.hidden = repackage_hidden(self.hidden)
@@ -827,7 +821,7 @@ class RLFeedforwardGateI(nn.Module):
         self.avg_layer = nn.AvgPool2d(pool_size)
         self.linear_layer = nn.Conv2d(in_channels=channel, out_channels=2,
                                       kernel_size=1, stride=1)
-        self.prob_layer = nn.Softmax()
+        self.prob_layer = nn.Softmax(dim=1)
 
         # saved actions and rewards
         self.saved_action = []
@@ -848,11 +842,14 @@ class RLFeedforwardGateI(nn.Module):
         softmax = self.prob_layer(x)
 
         if self.training:
-            action = softmax.multinomial()
-            self.saved_action = action
+            # Use torch.distributions.Categorical for modern PyTorch
+            m = torch.distributions.Categorical(softmax)
+            action = m.sample()
+            # Save both action and log_prob for REINFORCE
+            self.saved_action = (action, m.log_prob(action))
         else:
             action = (softmax[:, 1] > 0.5).float()
-            self.saved_action = action
+            self.saved_action = (action, None)
 
         action = action.view(action.size(0), 1, 1, 1).float()
         return action, softmax
@@ -873,7 +870,7 @@ class RLFeedforwardGateII(nn.Module):
         self.avg_layer = nn.AvgPool2d(pool_size)
         self.linear_layer = nn.Conv2d(in_channels=channel, out_channels=2,
                                       kernel_size=1, stride=1)
-        self.prob_layer = nn.Softmax()
+        self.prob_layer = nn.Softmax(dim=1)
 
         # saved actions and rewards
         self.saved_action = None
@@ -889,11 +886,14 @@ class RLFeedforwardGateII(nn.Module):
         softmax = self.prob_layer(x)
 
         if self.training:
-            action = softmax.multinomial()
-            self.saved_action = action
+            # Use torch.distributions.Categorical for modern PyTorch
+            m = torch.distributions.Categorical(softmax)
+            action = m.sample()
+            # Save both action and log_prob for REINFORCE
+            self.saved_action = (action, m.log_prob(action))
         else:
             action = (softmax[:, 1] > 0.5).float()
-            self.saved_action = action
+            self.saved_action = (action, None)
 
         action = action.view(action.size(0), 1, 1, 1).float()
         return action, softmax
@@ -927,7 +927,7 @@ class ResNetFeedForwardRL(nn.Module):
         self.avgpool = nn.AvgPool2d(8)
         self.fc = nn.Linear(64 * block.expansion, num_classes)
 
-        self.softmax = nn.Softmax()
+        self.softmax = nn.Softmax(dim=1)
         self.saved_actions = []
         self.rewards = []
 
@@ -1032,7 +1032,7 @@ class ResNetFeedForwardRL(nn.Module):
 
         if reinforce:  # for pure RL
             softmax = self.softmax(x)
-            action = softmax.multinomial()
+            action = softmax.multinomial(num_samples=1)
             self.saved_actions.append(action)
 
         return x, masks, gprobs
@@ -1115,10 +1115,8 @@ class RNNGatePolicy(nn.Module):
 
     def init_hidden(self, batch_size):
         # The axes semantics are (num_layers, minibatch_size, hidden_dim)
-        return (autograd.Variable(torch.zeros(1, batch_size,
-                                              self.hidden_dim).cuda()),
-                autograd.Variable(torch.zeros(1, batch_size,
-                                              self.hidden_dim).cuda()))
+        return (torch.zeros(1, batch_size, self.hidden_dim).cuda(),
+                torch.zeros(1, batch_size, self.hidden_dim).cuda())
 
     def repackage_hidden(self):
         self.hidden = repackage_hidden(self.hidden)
@@ -1133,14 +1131,17 @@ class RNNGatePolicy(nn.Module):
             proj = self.proj(out.squeeze())
             prob = self.prob(proj)
             bi_prob = torch.cat([1 - prob, prob], dim=1)
-            action = bi_prob.multinomial()
-            self.saved_actions.append(action)
+            # Use torch.distributions.Categorical for modern PyTorch
+            m = torch.distributions.Categorical(bi_prob)
+            action = m.sample()
+            # Save both action and log_prob for REINFORCE
+            self.saved_actions.append((action, m.log_prob(action)))
         else:
             proj = self.proj(out.squeeze())
             prob = self.prob(proj)
             bi_prob = torch.cat([1 - prob, prob], dim=1)
             action = (prob > 0.5).float()
-            self.saved_actions.append(action)
+            self.saved_actions.append((action, None))
         action = action.view(action.size(0), 1, 1, 1).float()
         return action, bi_prob
 
@@ -1170,7 +1171,7 @@ class ResNetRecurrentGateRL(nn.Module):
         self.avgpool = nn.AvgPool2d(8)
         self.fc = nn.Linear(64 * block.expansion, num_classes)
 
-        self.softmax = nn.Softmax()
+        self.softmax = nn.Softmax(dim=1)
 
         self.saved_actions = []
         self.rewards = []
@@ -1265,7 +1266,7 @@ class ResNetRecurrentGateRL(nn.Module):
         if self.training:
             x = self.fc(x)
             softmax = self.softmax(x)
-            pred = softmax.multinomial()
+            pred = softmax.multinomial(num_samples=1)
         else:
             x = self.fc(x)
             pred = x.max(1)[1]

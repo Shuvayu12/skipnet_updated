@@ -1,12 +1,10 @@
 """ This file for training SkipNet in Hybrid RL stage.
 Support PyTorch 2.0 and single GPU only.
 """
-from __future__ import print_function
 
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
-from torch.autograd import Variable
 import torch.nn.functional as F
 
 import os
@@ -29,7 +27,7 @@ class BatchCrossEntropy(nn.Module):
         super(BatchCrossEntropy, self).__init__()
 
     def forward(self, x, target):
-        logp = F.log_softmax(x)
+        logp = F.log_softmax(x, dim=1)
         target = target.view(-1,1)
         output = - logp.gather(1, target)
         return output
@@ -209,24 +207,25 @@ def run_training(args, tune_config={}, reporter=None):
         # measuring data loading time
         data_time.update(time.time() - end)
 
-        target = target.cuda(async=False)
-        input_var = Variable(input).cuda()
-        target_var = Variable(target).cuda()
+        target = target.cuda(non_blocking=False)
+        input = input.cuda()
 
         # compute output
-        output, masks, probs = model(input_var)
+        output, masks, probs = model(input)
 
         skips = [mask.data.le(0.5).float().mean() for mask in masks]
         if skip_ratios.len != len(skips):
             skip_ratios.set_len(len(skips))
 
-        pred_loss = criterion(output, target_var)
+        pred_loss = criterion(output, target)
 
         # re-weight gate rewards
         normalized_alpha = args.alpha / len(gate_saved_actions)
         # intermediate rewards for each gate
-        for act in gate_saved_actions:
-            gate_rewards.append((1 - act.float()).data * normalized_alpha)
+        for act_tuple in gate_saved_actions:
+            # Unpack: (action, log_prob) or (action, None)
+            action = act_tuple[0] if isinstance(act_tuple, tuple) else act_tuple
+            gate_rewards.append((1 - action.float()).data * normalized_alpha)
         # pdb.set_trace()
         # collect cumulative future rewards
         R = - pred_loss.data
@@ -235,25 +234,36 @@ def run_training(args, tune_config={}, reporter=None):
             R = r + args.gamma * R
             cum_rewards.insert(0, R)
 
-        # apply REINFORCE to each gate
-        # Pytorch 2.0 version. `reinforce` function got removed in Pytorch 3.0
-        for action, R in zip(gate_saved_actions, cum_rewards):
-             action.reinforce(args.rl_weight * R)
+        # apply REINFORCE using torch.distributions (modern PyTorch approach)
+        policy_losses = []
+        for act_tuple, R in zip(gate_saved_actions, cum_rewards):
+            if isinstance(act_tuple, tuple) and act_tuple[1] is not None:
+                # Modern approach: use log_prob from Categorical distribution
+                action, log_prob = act_tuple
+                # REINFORCE: loss = -log_prob * reward
+                policy_losses.append(-log_prob * args.rl_weight * R)
+            else:
+                # Fallback for non-training mode or old-style
+                pass
 
-
-        total_loss = total_criterion(output, target_var)
+        if policy_losses:
+            # Stack all policy losses across the batch
+            policy_loss = torch.stack(policy_losses).mean()
+            total_loss = total_criterion(output, target) + policy_loss
+        else:
+            total_loss = total_criterion(output, target)
 
         optimizer.zero_grad()
-        # optimize hybrid loss
-        torch.autograd.backward(gate_saved_actions + [total_loss])
+        total_loss.backward()
         optimizer.step()
 
         # measure accuracy and record loss
         prec1, = accuracy(output.data, target, topk=(1,))
         total_rewards.update(cum_rewards[0].mean(), input.size(0))
-        total_losses.update(total_loss.mean().data[0], input.size(0))
-        losses.update(pred_loss.mean().data[0], input.size(0))
-        top1.update(prec1[0], input.size(0))
+        total_rewards.update(cum_rewards[0].mean(), input.size(0))
+        total_losses.update(total_loss.mean().item(), input.size(0))
+        losses.update(pred_loss.mean().item(), input.size(0))
+        top1.update(prec1.item(), input.size(0))
         skip_ratios.update(skips, input.size(0))
         total_gate_reward = sum([r.mean() for r in gate_rewards])
 
@@ -325,25 +335,25 @@ def validate(args, test_loader, model):
     # switch to evaluation mode
     model.eval()
     end = time.time()
-    for i, (input, target) in enumerate(test_loader):
-        target = target.cuda(async=True)
-        input_var = Variable(input, volatile=True).cuda()
-        target_var = Variable(target, volatile=True).cuda()
+    with torch.no_grad():
+        for i, (input, target) in enumerate(test_loader):
+            target = target.cuda(non_blocking=True)
+            input = input.cuda()
 
-        output, masks, probs = model(input_var)
-        skips = [mask.data.le(0.5).float().mean() for mask in masks]
-        if skip_ratios.len != len(skips):
-            skip_ratios.set_len(len(skips))
+            output, masks, probs = model(input)
+            skips = [mask.data.le(0.5).float().mean() for mask in masks]
+            if skip_ratios.len != len(skips):
+                skip_ratios.set_len(len(skips))
 
-        # measure accuracy and record loss
-        prec1, = accuracy(output.data, target, topk=(1,))
-        top1.update(prec1[0], input.size(0))
-        skip_ratios.update(skips, input.size(0))
-        batch_time.update(time.time() - end)
-        end = time.time()
+            # measure accuracy and record loss
+            prec1, = accuracy(output.data, target, topk=(1,))
+            top1.update(prec1.item(), input.size(0))
+            skip_ratios.update(skips, input.size(0))
+            batch_time.update(time.time() - end)
+            end = time.time()
 
-        if i % args.print_freq == 0 or (i == (len(test_loader) - 1)):
-            logging.info(
+            if i % args.print_freq == 0 or (i == (len(test_loader) - 1)):
+                logging.info(
                 'Test: [{}/{}]\t'
                 'Time: {batch_time.val:.4f}({batch_time.avg:.4f})\t'
                 'Prec@1: {top1.val:.3f}({top1.avg:.3f})\t'.format(
