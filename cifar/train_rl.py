@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
+import torch.distributions as dist
 
 import os
 import shutil
@@ -223,10 +224,14 @@ def run_training(args, tune_config={}, reporter=None):
         normalized_alpha = args.alpha / len(gate_saved_actions)
         # intermediate rewards for each gate
         for act_tuple in gate_saved_actions:
-            # Unpack: (action, log_prob) or (action, None)
-            action = act_tuple[0] if isinstance(act_tuple, tuple) else act_tuple
+            # Handle both old and new format
+            if isinstance(act_tuple, tuple):
+                action = act_tuple[0]  # Extract action from tuple
+            else:
+                action = act_tuple  # Old format where it's just the action
+            
             gate_rewards.append((1 - action.float()).data * normalized_alpha)
-        # pdb.set_trace()
+
         # collect cumulative future rewards
         R = - pred_loss.data
         cum_rewards = []
@@ -237,18 +242,19 @@ def run_training(args, tune_config={}, reporter=None):
         # apply REINFORCE using torch.distributions (modern PyTorch approach)
         policy_losses = []
         for act_tuple, R in zip(gate_saved_actions, cum_rewards):
-            if isinstance(act_tuple, tuple) and act_tuple[1] is not None:
-                # Modern approach: use log_prob from Categorical distribution
-                action, log_prob = act_tuple
+            if isinstance(act_tuple, tuple) and len(act_tuple) >= 2:
+                # Modern approach: action and log_prob should be stored
+                action, log_prob = act_tuple[0], act_tuple[1]
                 # REINFORCE: loss = -log_prob * reward
                 policy_losses.append(-log_prob * args.rl_weight * R)
             else:
-                # Fallback for non-training mode or old-style
-                pass
+                # Fallback - if model doesn't store log_prob, skip policy loss
+                logging.warning("Action tuple doesn't contain log_prob, skipping policy loss")
+                continue
 
         if policy_losses:
-            # Stack all policy losses across the batch
-            policy_loss = torch.stack(policy_losses).mean()
+            # Stack all policy losses across the batch and take mean
+            policy_loss = torch.stack(policy_losses).sum()  # Use sum() for policy gradient
             total_loss = total_criterion(output, target) + policy_loss
         else:
             total_loss = total_criterion(output, target)
@@ -259,7 +265,6 @@ def run_training(args, tune_config={}, reporter=None):
 
         # measure accuracy and record loss
         prec1, = accuracy(output.data, target, topk=(1,))
-        total_rewards.update(cum_rewards[0].mean(), input.size(0))
         total_rewards.update(cum_rewards[0].mean(), input.size(0))
         total_losses.update(total_loss.mean().item(), input.size(0))
         losses.update(pred_loss.mean().item(), input.size(0))
@@ -368,12 +373,6 @@ def validate(args, test_loader, model):
 
     skip_summaries = []
     for idx in range(skip_ratios.len):
-        # logging.info(
-        #     "{} layer skipping = {:.3f}".format(
-        #         idx,
-        #         skip_ratios.avg[idx],
-        #     )
-        # )
         skip_summaries.append(1-skip_ratios.avg[idx])
     # compute `computational percentage`
     cp = ((sum(skip_summaries) + 1) / (len(skip_summaries) + 1)) * 100
@@ -500,5 +499,3 @@ def accuracy(output, target, topk=(1,)):
 
 if __name__ == '__main__':
     main()
-
-
